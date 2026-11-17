@@ -1,0 +1,206 @@
+--[[
+    SILENT AIM | Roblox HvH
+    Executor: any Luau executor exposing hookmetamethod / Drawing
+    Silent = read-side camera hook: shots bend toward target,
+             rendered view never snaps. This is NOT an aimbot.
+]]
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+
+local LP     = Players.LocalPlayer
+local Mouse  = LP:GetMouse()
+local Camera = Workspace.CurrentCamera
+
+-- ===================== CONFIG =====================
+local CFG = {
+    enabled    = true,
+    keybind    = Enum.KeyCode.F,   -- toggle
+    holdMode   = false,            -- true = only while key held
+    fov        = 300,              -- px radius from screen center
+    teamCheck  = false,            -- HvH is usually FFA -> keep false
+    wallCheck  = false,            -- require line of sight
+    aimPart    = "Head",
+    prediction = 0.12,             -- sec velocity lead (HvH lag comp)
+    showFov    = true,
+}
+
+-- ===================== STATE =====================
+local computing = false
+local aimedCameraCFrame = nil
+local aimedMouseHit     = nil
+local aimedMouseRay     = nil
+
+-- ===================== HELPERS =====================
+local function alive(plr)
+    local char = plr.Character
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    return hum ~= nil and hum.Health > 0
+end
+
+local function aimPart(plr)
+    local char = plr.Character
+    if not char then return nil end
+    return char:FindFirstChild(CFG.aimPart)
+        or char:FindFirstChild("Head")
+        or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function screenCenter()
+    local v = Camera.ViewportSize
+    return Vector2.new(v.X * 0.5, v.Y * 0.5)
+end
+
+local function screenDist(part)
+    local p, onScreen = Camera:WorldToViewportPoint(part.Position)
+    if not onScreen then return math.huge end
+    return (Vector2.new(p.X, p.Y) - screenCenter()).Magnitude
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function wallClear(part)
+    if not CFG.wallCheck then return true end
+    local origin = Camera.CFrame.Position
+    rayParams.FilterDescendantsInstances = { LP.Character, part.Parent }
+    return Workspace:Raycast(origin, part.Position - origin, rayParams) == nil
+end
+
+local function isValid(plr)
+    if plr == LP or not alive(plr) then return false end
+    if CFG.teamCheck and plr.Team and LP.Team and plr.Team == LP.Team then
+        return false
+    end
+    local part = aimPart(plr)
+    return part ~= nil and wallClear(part)
+end
+
+local function getTarget()
+    local best, bestDist = nil, CFG.fov
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if isValid(plr) then
+            local part = aimPart(plr)
+            if part then
+                local d = screenDist(part)
+                if d <= bestDist then
+                    best, bestDist = plr, d
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function predictedPos(part)
+    local pos = part.Position
+    if CFG.prediction > 0 then
+        local vel = part.AssemblyLinearVelocity
+        pos = pos + vel * CFG.prediction
+    end
+    return pos
+end
+
+-- ===================== CAMERA / MOUSE HOOK =====================
+local oldIndex
+oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+    if not computing and CFG.enabled then
+        if self == Camera and key == "CFrame" and aimedCameraCFrame then
+            return aimedCameraCFrame
+        end
+        if self == Mouse and aimedMouseHit and key == "Hit" then
+            return aimedMouseHit
+        end
+        if self == Mouse and aimedMouseRay and key == "UnitRay" then
+            return aimedMouseRay
+        end
+    end
+    return oldIndex(self, key)
+end))
+
+-- ===================== FOV CIRCLE =====================
+local fovCircle
+pcall(function()
+    fovCircle = Drawing.new("Circle")
+    fovCircle.Thickness = 1
+    fovCircle.NumSides   = 64
+    fovCircle.Color      = Color3.fromRGB(255, 255, 255)
+    fovCircle.Transparency = 0.45
+    fovCircle.Filled     = false
+end)
+
+-- ===================== AIM UPDATE =====================
+local function clearAim()
+    aimedCameraCFrame = nil
+    aimedMouseHit     = nil
+    aimedMouseRay     = nil
+end
+
+local function updateAim()
+    if not CFG.enabled then clearAim() return end
+
+    local target = getTarget()
+    if not target then clearAim() return end
+
+    local part = aimPart(target)
+    if not part then clearAim() return end
+
+    local pos = predictedPos(part)
+
+    -- read TRUE camera cframe with hook bypassed
+    computing = true
+    local trueCF = Camera.CFrame
+    computing = false
+
+    local origin = trueCF.Position
+    local dir    = (pos - origin).Unit
+
+    aimedCameraCFrame = CFrame.lookAt(origin, pos)
+
+    if Mouse then
+        local hitPoint = origin + dir * 1000
+        aimedMouseHit  = CFrame.new(hitPoint, hitPoint + dir)
+        aimedMouseRay  = Ray.new(origin, dir)
+    end
+end
+
+-- ===================== LOOP =====================
+RunService.RenderStepped:Connect(function()
+    if Workspace.CurrentCamera ~= Camera then
+        Camera = Workspace.CurrentCamera
+    end
+
+    updateAim()
+
+    if fovCircle then
+        fovCircle.Position = screenCenter()
+        fovCircle.Radius   = CFG.fov
+        fovCircle.Visible  = CFG.showFov and CFG.enabled
+    end
+end)
+
+-- ===================== KEYBIND =====================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == CFG.keybind then
+        if CFG.holdMode then
+            CFG.enabled = true
+        else
+            CFG.enabled = not CFG.enabled
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if CFG.holdMode and input.KeyCode == CFG.keybind then
+        CFG.enabled = false
+    end
+end)
+
+print("[silent aim] loaded | F = toggle | FOV:", CFG.fov)
